@@ -1,0 +1,317 @@
+{
+    "name": "RAG News Summarizer (Production)",
+    "nodes": [
+      {
+        "parameters": {},
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "name": "Manual Trigger",
+        "type": "n8n-nodes-base.manualTrigger",
+        "typeVersion": 1,
+        "position": [240, 400]
+      },
+      {
+        "parameters": {
+          "url": "https://newsapi.org/v2/top-headlines",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "newsApiApi",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "country",
+                "value": "us"
+              },
+              {
+                "name": "language",
+                "value": "en"
+              },
+              {
+                "name": "pageSize",
+                "value": "10"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 10000
+          }
+        },
+        "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+        "name": "Fetch News",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [460, 400],
+        "continueOnFail": true
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict"
+            },
+            "conditions": [
+              {
+                "id": "condition1",
+                "leftValue": "={{ $json.status }}",
+                "rightValue": "ok",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals"
+                }
+              },
+              {
+                "id": "condition2",
+                "leftValue": "={{ $json.articles?.length || 0 }}",
+                "rightValue": 0,
+                "operator": {
+                  "type": "number",
+                  "operation": "gt"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "id": "check1234-5678-9abc-def0-123456789abc",
+        "name": "Check Valid Response",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2,
+        "position": [680, 400]
+      },
+      {
+        "parameters": {
+          "jsCode": "return [{\n  json: {\n    error: true,\n    message: \"No articles found or API error\",\n    timestamp: new Date().toISOString()\n  }\n}];"
+        },
+        "id": "error123-4567-89ab-cdef-0123456789ab",
+        "name": "Handle Empty Result",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [900, 540]
+      },
+      {
+        "parameters": {
+          "jsCode": "const articles = $input.first().json.articles || [];\nconst preparedArticles = [];\n\nfor (let i = 0; i < Math.min(articles.length, 10); i++) {\n  const article = articles[i];\n  if (article.title && article.description) {\n    preparedArticles.push({\n      json: {\n        id: i,\n        title: article.title,\n        description: article.description,\n        url: article.url,\n        publishedAt: article.publishedAt,\n        source: article.source?.name || 'Unknown',\n        text: `${article.title}. ${article.description}`,\n        metadata: {\n          title: article.title,\n          url: article.url,\n          source: article.source?.name || 'Unknown'\n        }\n      }\n    });\n  }\n}\n\nreturn preparedArticles;"
+        },
+        "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+        "name": "Prepare Articles",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [900, 400]
+      },
+      {
+        "parameters": {
+          "url": "https://api.openai.com/v1/embeddings",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "openAiApi",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={\n  \"model\": \"text-embedding-3-small\",\n  \"input\": {{ $json.text ? JSON.stringify($json.text) : '\"\"' }}\n}",
+          "options": {
+            "timeout": 30000,
+            "retry": {
+              "enabled": true,
+              "maxRetries": 3,
+              "waitBetweenRetries": 1000
+            }
+          }
+        },
+        "id": "d4e5f6a7-b8c9-0123-def1-234567890123",
+        "name": "Generate Embeddings",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [1120, 400],
+        "continueOnFail": true
+      },
+      {
+        "parameters": {
+          "jsCode": "const items = $input.all();\nconst articlesWithEmbeddings = [];\nconst sourceItems = $items('Prepare Articles', 0);\n\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i];\n  if (item.json?.data?.[0]?.embedding) {\n    const embedding = item.json.data[0].embedding;\n    const pairedIndex = item.pairedItem?.item;\n    const originalJson = (typeof pairedIndex === 'number') ? sourceItems[pairedIndex]?.json : null;\n    if (originalJson) {\n      articlesWithEmbeddings.push({\n        id: originalJson.id,\n        title: originalJson.title,\n        description: originalJson.description,\n        url: originalJson.url,\n        source: originalJson.source,\n        publishedAt: originalJson.publishedAt,\n        text: originalJson.text,\n        embedding: embedding,\n        metadata: originalJson.metadata\n      });\n    }\n  }\n}\n\nif (articlesWithEmbeddings.length === 0) {\n  throw new Error('No embeddings generated successfully');\n}\n\n$flow.set('vectorStore', articlesWithEmbeddings);\n\nconst queryText = \"What are the main news stories today?\";\n\nreturn [{\n  json: {\n    queryText: queryText,\n    totalArticles: articlesWithEmbeddings.length,\n    articlesStored: true\n  }\n}];"
+        },
+        "id": "e5f6a7b8-c9d0-1234-ef12-345678901234",
+        "name": "Store Vectors",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [1340, 400]
+      },
+      {
+        "parameters": {
+          "url": "https://api.openai.com/v1/embeddings",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "openAiApi",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={\n  \"model\": \"text-embedding-3-small\",\n  \"input\": {{ $json.queryText ? JSON.stringify($json.queryText) : '\"\"' }}\n}",
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "id": "query123-4567-89ab-cdef-0123456789ab",
+        "name": "Generate Query Embedding",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [1560, 400]
+      },
+      {
+        "parameters": {
+          "jsCode": "function cosineSimilarity(vecA, vecB) {\n  let dotProduct = 0;\n  let normA = 0;\n  let normB = 0;\n  for (let i = 0; i < vecA.length; i++) {\n    dotProduct += vecA[i] * vecB[i];\n    normA += vecA[i] * vecA[i];\n    normB += vecB[i] * vecB[i];\n  }\n  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));\n}\n\nconst queryEmbedding = $input.first().json.data[0].embedding;\nconst vectorStore = $flow.get('vectorStore');\n\nif (!vectorStore || vectorStore.length === 0) {\n  throw new Error('No vectors found in store');\n}\n\nconst similarities = vectorStore.map(article => ({\n  ...article,\n  similarity: cosineSimilarity(queryEmbedding, article.embedding)\n}));\n\nconst topArticles = similarities\n  .sort((a, b) => b.similarity - a.similarity)\n  .slice(0, 7);\n\nlet context = '';\nlet tokenCount = 0;\nconst maxTokens = 2500;\nconst selectedArticles = [];\n\nfor (const article of topArticles) {\n  const articleText = `Title: ${article.title}\\nSource: ${article.source}\\nDescription: ${article.description}\\n`;\n  const estimatedTokens = Math.ceil(articleText.length / 4);\n  if (tokenCount + estimatedTokens < maxTokens) {\n    context += articleText + '\\n';\n    tokenCount += estimatedTokens;\n    selectedArticles.push({\n      title: article.title,\n      url: article.url,\n      source: article.source,\n      similarity: article.similarity.toFixed(3)\n    });\n  }\n}\n\nreturn [{\n  json: {\n    context: context,\n    sources: selectedArticles,\n    totalArticles: vectorStore.length,\n    selectedCount: selectedArticles.length,\n    estimatedTokens: tokenCount\n  }\n}];"
+        },
+        "id": "sim12345-6789-abcd-ef01-23456789abcd",
+        "name": "Similarity Search & Retrieve",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [1780, 400]
+      },
+      {
+        "parameters": {
+          "url": "https://api.openai.com/v1/chat/completions",
+          "authentication": "predefinedCredentialType",
+          "nodeCredentialType": "openAiApi",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a professional news analyst. Create a coherent 3-paragraph summary of the provided news articles. Each paragraph should focus on a major theme or topic. Use clear, journalistic language.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Here are today's most relevant news articles ({{ $json.selectedCount }} of {{ $json.totalArticles }} total):\\n\\n{{ $json.context }}\\n\\nPlease provide a concise 3-paragraph summary covering the main themes and key events. Structure: Paragraph 1 - Leading stories, Paragraph 2 - Secondary themes, Paragraph 3 - Notable developments.\"\n    }\n  ],\n  \"temperature\": 0.7,\n  \"max_tokens\": 600\n}",
+          "options": {
+            "timeout": 60000,
+            "retry": {
+              "enabled": true,
+              "maxRetries": 2,
+              "waitBetweenRetries": 2000
+            }
+          }
+        },
+        "id": "f6a7b8c9-d0e1-2345-f123-456789012345",
+        "name": "Summarize with OpenAI",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [2000, 400],
+        "continueOnFail": true
+      },
+      {
+        "parameters": {
+          "jsCode": "const input = $input.first().json;\nconst sources = $node['Similarity Search & Retrieve'].json.sources;\n\nif (input.error) {\n  return [{\n    json: {\n      error: true,\n      message: input.error.message || 'OpenAI API error',\n      timestamp: new Date().toISOString()\n    }\n  }];\n}\n\nconst summary = input.choices?.[0]?.message?.content || 'Summary unavailable';\n\nconst inputTokens = input.usage?.prompt_tokens || 0;\nconst outputTokens = input.usage?.completion_tokens || 0;\nconst estimatedCost = ((inputTokens / 1000) * 0.00015) + ((outputTokens / 1000) * 0.0006);\n\nreturn [{\n  json: {\n    summary: summary,\n    sources: sources,\n    metadata: {\n      timestamp: new Date().toISOString(),\n      model: 'gpt-4o-mini',\n      totalArticlesFetched: $node['Similarity Search & Retrieve'].json.totalArticles,\n      articlesUsed: $node['Similarity Search & Retrieve'].json.selectedCount,\n      tokensUsed: {\n        input: inputTokens,\n        output: outputTokens,\n        total: inputTokens + outputTokens\n      },\n      estimatedCost: `$${estimatedCost.toFixed(4)}`\n    }\n  }\n}];"
+        },
+        "id": "a7b8c9d0-e1f2-3456-1234-567890123456",
+        "name": "Format Output",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [2220, 400]
+      }
+    ],
+    "connections": {
+      "Manual Trigger": {
+        "main": [
+          [
+            {
+              "node": "Fetch News",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch News": {
+        "main": [
+          [
+            {
+              "node": "Check Valid Response",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Valid Response": {
+        "main": [
+          [
+            {
+              "node": "Prepare Articles",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Handle Empty Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Prepare Articles": {
+        "main": [
+          [
+            {
+              "node": "Generate Embeddings",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate Embeddings": {
+        "main": [
+          [
+            {
+              "node": "Store Vectors",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Store Vectors": {
+        "main": [
+          [
+            {
+              "node": "Generate Query Embedding",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Generate Query Embedding": {
+        "main": [
+          [
+            {
+              "node": "Similarity Search & Retrieve",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Similarity Search & Retrieve": {
+        "main": [
+          [
+            {
+              "node": "Summarize with OpenAI",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Summarize with OpenAI": {
+        "main": [
+          [
+            {
+              "node": "Format Output",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "pinData": {},
+    "settings": {
+      "executionOrder": "v1"
+    },
+    "staticData": null,
+    "tags": [],
+    "triggerCount": 0,
+    "updatedAt": "2025-10-30T00:00:00.000Z",
+    "versionId": "1"
+  }
